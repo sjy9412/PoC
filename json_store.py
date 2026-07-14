@@ -34,21 +34,33 @@ def to_json_string(data: dict | list, indent: int | None = None) -> str:
 
 
 # ──────────────────────────────────────────────
-# 저장소 초기화 (파일 없으면 빈 리스트 생성)
+# 저장소 초기화 / 스토어 I/O
 # ──────────────────────────────────────────────
 
 def init_store(path: str | Path) -> None:
-    """DB 파일이 없으면 빈 배열로 초기화."""
+    """DB 파일이 없으면 초기 스토어로 생성."""
     p = Path(path)
     if not p.exists():
-        save_json_file([], p)
+        save_json_file({"next_id": 1, "records": []}, p)
 
 
-def load_records(path: str | Path) -> list[dict]:
-    """저장된 레코드 전체를 반환."""
+def load_store(path: str | Path) -> dict:
+    """스토어 전체(next_id + records)를 반환."""
     return load_json_file(path)
 
 
+def save_store(store: dict, path: str | Path) -> None:
+    """스토어 전체를 파일에 저장."""
+    save_json_file(store, path)
+
+
+def load_records(path: str | Path) -> list[dict]:
+    """저장된 레코드 목록만 반환."""
+    return load_store(path)["records"]
+
+
 def persist_records(records: list[dict], path: str | Path) -> None:
-    """레코드 전체를 파일에 덮어 씀."""
-    save_json_file(records, path)
+    """레코드 목록을 파일에 반영 (next_id는 유지)."""
+    store = load_store(path)
+    store["records"] = records
+    save_store(store, path)

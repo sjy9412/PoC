@@ -18,6 +18,8 @@ from pathlib import Path
 import crud
 from json_store import (
     init_store,
+    load_store,
+    save_store,
     load_records,
     persist_records,
     parse_json_string,
@@ -74,9 +76,9 @@ class TestCreateRegression:
 
     def test_create_persists_to_file(self, db_path: Path):
         create_user("홍길동", 30, "서울")
-        raw = json.loads(db_path.read_text(encoding="utf-8"))
-        assert len(raw) == 1
-        assert raw[0]["name"] == "홍길동"
+        store = json.loads(db_path.read_text(encoding="utf-8"))
+        assert len(store["records"]) == 1
+        assert store["records"][0]["name"] == "홍길동"
 
     def test_multiple_creates_all_persisted(self, db_path: Path):
         create_user("A", 10, "서울")
@@ -238,30 +240,41 @@ class TestDeleteRegression:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestIdEdge:
-    def test_id_based_on_max_existing_not_global_counter(self):
-        """ID는 전역 카운터가 아닌 max(현재 존재 ID) + 1.
-
-        최고 ID 레코드를 삭제하면 그 ID가 재사용된다 — 잠재적 버그.
-        (예: A=1, B=2 → delete B → C = max([1])+1 = 2, not 3)
-        """
+    def test_id_never_reused_after_partial_delete(self):
+        """최고 ID 삭제 후 새 레코드는 삭제된 ID를 재사용하지 않는다."""
         create_user("A", 20, "서울")   # id=1
         create_user("B", 21, "부산")   # id=2
-        delete_user(2)                  # 남은 records: [id=1]
+        delete_user(2)
         u3 = create_user("C", 22, "인천")
-        assert u3["id"] == 2  # max([1]) + 1 = 2 → ID 재사용 발생
+        assert u3["id"] == 3  # next_id 카운터가 3이므로 재사용 없음
 
-    def test_id_restarts_when_db_is_fully_emptied(self):
-        """전체 삭제 후 ID 는 1 부터 재시작 (max() default=0 + 1)."""
-        u1 = create_user("A", 20, "서울")
+    def test_id_never_reused_after_full_clear(self):
+        """전체 삭제 후에도 next_id 카운터는 리셋되지 않는다."""
+        u1 = create_user("A", 20, "서울")  # id=1
         delete_user(u1["id"])
         u2 = create_user("B", 21, "부산")
-        assert u2["id"] == 1
+        assert u2["id"] == 2  # 1이 아님
 
     def test_ids_unique_across_large_batch(self):
         users = [create_user(f"U{i}", i, "서울") for i in range(100)]
         ids = [u["id"] for u in users]
         assert ids == list(range(1, 101))
         assert len(set(ids)) == 100
+
+    def test_next_id_increments_in_store(self, db_path: Path):
+        """create_user 호출마다 파일의 next_id가 1씩 증가한다."""
+        assert load_store(db_path)["next_id"] == 1
+        create_user("A", 20, "서울")
+        assert load_store(db_path)["next_id"] == 2
+        create_user("B", 21, "부산")
+        assert load_store(db_path)["next_id"] == 3
+
+    def test_next_id_not_affected_by_delete(self, db_path: Path):
+        """삭제는 next_id를 변경하지 않는다."""
+        create_user("A", 20, "서울")
+        create_user("B", 21, "부산")
+        delete_user(1)
+        assert load_store(db_path)["next_id"] == 3
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -489,38 +502,73 @@ class TestInitStore:
         init_store(path)
         assert path.exists()
 
-    def test_created_file_contains_empty_array(self, tmp_path: Path):
+    def test_created_store_has_correct_format(self, tmp_path: Path):
         path = tmp_path / "new.json"
         init_store(path)
-        assert json.loads(path.read_text(encoding="utf-8")) == []
+        store = json.loads(path.read_text(encoding="utf-8"))
+        assert store == {"next_id": 1, "records": []}
 
     def test_does_not_overwrite_existing_data(self, tmp_path: Path):
         path = tmp_path / "existing.json"
-        save_json_file([{"id": 99, "name": "보존"}], path)
+        save_json_file({"next_id": 100, "records": [{"id": 99, "name": "보존"}]}, path)
         init_store(path)
         assert load_records(path)[0]["id"] == 99
 
-    def test_idempotent_on_empty_file(self, tmp_path: Path):
+    def test_idempotent_on_empty_store(self, tmp_path: Path):
         path = tmp_path / "store.json"
         init_store(path)
         init_store(path)
-        assert load_records(path) == []
+        store = load_store(path)
+        assert store["records"] == []
+        assert store["next_id"] == 1
 
 
 class TestPersistAndLoadRecords:
     def test_roundtrip(self, tmp_path: Path):
         path = tmp_path / "rec.json"
+        save_json_file({"next_id": 3, "records": []}, path)
         records = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
         persist_records(records, path)
         assert load_records(path) == records
 
     def test_persist_empty_list(self, tmp_path: Path):
         path = tmp_path / "rec.json"
+        save_json_file({"next_id": 1, "records": [{"id": 1}]}, path)
         persist_records([], path)
         assert load_records(path) == []
 
-    def test_persist_overwrites(self, tmp_path: Path):
+    def test_persist_does_not_change_next_id(self, tmp_path: Path):
+        """persist_records는 next_id를 변경하지 않는다."""
         path = tmp_path / "rec.json"
-        persist_records([{"id": 1}], path)
-        persist_records([{"id": 2}], path)
-        assert load_records(path) == [{"id": 2}]
+        save_json_file({"next_id": 42, "records": []}, path)
+        persist_records([{"id": 1, "name": "A"}], path)
+        assert load_store(path)["next_id"] == 42
+
+    def test_persist_overwrites_records_only(self, tmp_path: Path):
+        path = tmp_path / "rec.json"
+        save_json_file({"next_id": 5, "records": [{"id": 1}]}, path)
+        persist_records([{"id": 99}], path)
+        store = load_store(path)
+        assert store["records"] == [{"id": 99}]
+        assert store["next_id"] == 5
+
+
+class TestLoadStoreSaveStore:
+    def test_load_store_returns_full_structure(self, tmp_path: Path):
+        path = tmp_path / "s.json"
+        init_store(path)
+        store = load_store(path)
+        assert "next_id" in store
+        assert "records" in store
+
+    def test_save_and_load_store_roundtrip(self, tmp_path: Path):
+        path = tmp_path / "s.json"
+        original = {"next_id": 7, "records": [{"id": 6, "name": "X"}]}
+        save_store(original, path)
+        assert load_store(path) == original
+
+    def test_save_store_overwrites_completely(self, tmp_path: Path):
+        path = tmp_path / "s.json"
+        save_store({"next_id": 1, "records": []}, path)
+        save_store({"next_id": 99, "records": [{"id": 98}]}, path)
+        assert load_store(path)["next_id"] == 99

@@ -4,7 +4,7 @@ json_store 의 I/O 함수를 통해서만 파일에 접근한다.
 """
 
 from pathlib import Path
-from json_store import load_records, persist_records
+from json_store import load_store, save_store, load_records, persist_records
 
 DB_PATH = Path("data/users.json")
 
@@ -15,13 +15,12 @@ DB_PATH = Path("data/users.json")
 
 def create_user(name: str, age: int, city: str) -> dict:
     """새 사용자를 생성하고 저장 후 반환."""
-    records = load_records(DB_PATH)
-
-    next_id = max((r["id"] for r in records), default=0) + 1
-    user = {"id": next_id, "name": name, "age": age, "city": city}
-
-    records.append(user)
-    persist_records(records, DB_PATH)
+    store = load_store(DB_PATH)
+    nid = store["next_id"]
+    user = {"id": nid, "name": name, "age": age, "city": city}
+    store["records"].append(user)
+    store["next_id"] = nid + 1
+    save_store(store, DB_PATH)
     return user
 
 
